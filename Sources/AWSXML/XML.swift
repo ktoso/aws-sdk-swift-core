@@ -12,6 +12,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import SwiftyExpat
 import struct Foundation.Data
 import class Foundation.NSObject
 #if canImport(FoundationXML)
@@ -218,18 +219,11 @@ public enum XML {
             self.stringValue = stringValue
         }
 
-        /// initialise XML.Element from xml data
-        public init(xmlData: Data) throws {
+        /// initialise XML.Element from xml string
+        public init(xmlString: String) throws {
             super.init(.element)
-            let parser = XMLParser(data: xmlData)
-            let parserDelegate = ParserDelegate()
-            parser.delegate = parserDelegate
-            if !parser.parse() {
-                if let error = parserDelegate.error {
-                    throw error
-                }
-                throw ParsingError.noXMLFound
-            } else if let rootElement = parserDelegate.rootElement {
+            
+            if let rootElement = try Self.parse(xml: xmlString) {
                 // copy contents of rootElement
                 self.setChildren(rootElement.children)
                 self.setAttributes(rootElement.attributes)
@@ -240,12 +234,62 @@ public enum XML {
             }
         }
 
-        /// initialise XML.Element from xml string
-        public convenience init(xmlString: String) throws {
-            let data = xmlString.data(using: .utf8)!
-            try self.init(xmlData: data)
+        /// initialise XML.Element from xml data
+        public convenience init(xmlData: Data) throws {
+            let xml = String(decoding: xmlData, as: Unicode.UTF8.self)
+            try self.init(xmlString: xml)
         }
-
+        
+        /// Parse XML string and return an XML root element
+        static func parse(xml: String) throws -> Element? {
+            var rootElement: XML.Element?
+            var currentElement: XML.Element?
+            var currentNamespace: XML.Node?
+            var errorFound = false
+            
+            let parser = Expat()
+                .onStartElement { name, attrs in
+                    let element = XML.Element(name: name)
+                    for attribute in attrs {
+                        element.addAttribute(XML.Node(.attribute, name: attribute.key, stringValue: attribute.value))
+                    }
+                    if rootElement == nil {
+                        rootElement = element
+                    }
+                    currentElement?.addChild(element)
+                    currentElement = element
+                    if let namespace = currentNamespace {
+                        currentElement?.addNamespace(namespace)
+                        currentNamespace = nil
+                    }
+                }
+                .onEndElement { name in
+                    currentElement = currentElement?.parent as? XML.Element
+                }
+                .onCharacterData { characters in
+                    guard let characters = characters else { return }
+                    // if string with white space removed still has characters, add text node
+                    if characters.split(omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespaceOrNewline }).joined().count > 0 {
+                        currentElement?.addChild(XML.Node.text(stringValue: characters))
+                    }
+                }
+                .onStartNamespace { prefix, uri in
+                    currentNamespace = .namespace(withName: prefix, stringValue: uri)
+                }
+                .onError { error in
+                    errorFound = true
+                    print("ERROR: \(error)")
+                }
+            
+            _ = parser.feed(xml)
+            _ = parser.close()
+            
+            if errorFound {
+                throw ParsingError.parseError
+            }
+            return rootElement
+        }
+        
         /// return children XML elements
         public func elements(forName: String) -> [XML.Element] {
             return children?.compactMap {
@@ -405,66 +449,17 @@ public enum XML {
     enum ParsingError: Error {
         case emptyFile
         case noXMLFound
+        case parseError
 
         var localizedDescription: String {
             switch self {
             case .emptyFile:
                 return "File contained nothing"
+            case .parseError:
+                return "Error parsing file"
             case .noXMLFound:
                 return "File didn't contain any XML"
             }
-        }
-    }
-
-    /// parser delegate used in XML parsing
-    fileprivate class ParserDelegate: NSObject, XMLParserDelegate {
-        var rootElement: XML.Element?
-        var currentElement: XML.Element?
-        var error: Error?
-
-        override init() {
-            self.currentElement = nil
-            self.rootElement = nil
-            super.init()
-        }
-
-        func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
-            let element = XML.Element(name: elementName)
-            for attribute in attributeDict {
-                element.addAttribute(XML.Node(.attribute, name: attribute.key, stringValue: attribute.value))
-            }
-            if rootElement == nil {
-                rootElement = element
-            }
-            currentElement?.addChild(element)
-            currentElement = element
-        }
-
-        func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
-            currentElement = currentElement?.parent as? XML.Element
-        }
-
-        func parser(_ parser: XMLParser, foundCharacters: String) {
-            // if string with white space removed still has characters, add text node
-            if foundCharacters.split(omittingEmptySubsequences: true, whereSeparator: { $0.isWhitespaceOrNewline }).joined().count > 0 {
-                currentElement?.addChild(XML.Node.text(stringValue: foundCharacters))
-            }
-        }
-
-        func parser(_ parser: XMLParser, foundComment comment: String) {
-            currentElement?.addChild(XML.Node.comment(stringValue: comment))
-        }
-
-        func parser(_ parser: XMLParser, foundCDATA CDATABlock: Data) {
-            currentElement?.addChild(XML.Node.text(stringValue: String(data: CDATABlock, encoding: .utf8)!))
-        }
-
-        func parser(_ parser: XMLParser, parseErrorOccurred parseError: Error) {
-            error = parseError
-        }
-
-        func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) {
-            error = validationError
         }
     }
 }
